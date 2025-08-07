@@ -1,2 +1,1 @@
 ffmpeg
-./install_deps.sh
