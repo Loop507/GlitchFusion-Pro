@@ -4,4 +4,3 @@ numpy>=1.24.0
 scipy>=1.11.0
 soundfile>=0.12.1
 librosa>=0.10.1
-moviepy @ https://files.pythonhosted.org/packages/b9/37/1b5900b957e849923363dfd73010b9915507021570778f23788eb229f37c/moviepy-1.0.3.tar.gz
