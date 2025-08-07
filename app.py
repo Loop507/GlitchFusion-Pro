@@ -6,8 +6,8 @@ import os
 import random
 import soundfile as sf
 import shutil
+import subprocess
 from scipy import signal
-from moviepy.editor import VideoFileClip, AudioFileClip
 
 # ==========================
 # FUNZIONI PER GLI EFFETTI
@@ -104,43 +104,6 @@ def apply_digital_corruption_effect(frame, intensity):
                 if new_y + block_h <= h and new_x + block_w <= w:
                     frame[new_y:new_y+block_h, new_x:new_x+block_w] = block
     
-    num_corrupt_lines = int(h * 0.3 * intensity)
-    for _ in range(num_corrupt_lines):
-        line_y = random.randint(0, h-1)
-        corrupt_length = random.randint(int(w * 0.1), int(w * 0.8))
-        start_x = random.randint(0, max(1, w - corrupt_length))
-        
-        if start_x + corrupt_length <= w:
-            noise = np.random.randint(0, 256, (1, corrupt_length, 3), dtype=np.uint8)
-            frame[line_y:line_y+1, start_x:start_x+corrupt_length] = noise
-            
-            if line_y > 2:
-                frame[line_y-1:line_y, start_x:start_x+corrupt_length] = noise
-            if line_y < h-2:
-                frame[line_y+1:line_y+2, start_x:start_x+corrupt_length] = noise
-    
-    if intensity > 0.5:
-        separation = int(15 * intensity)
-        b, g, r = cv2.split(frame)
-        r = np.roll(r, -separation, axis=1)
-        g = np.roll(g, 0, axis=1)
-        b = np.roll(b, separation, axis=1)
-        frame = cv2.merge((b, g, r))
-    
-    if intensity > 0.7:
-        num_black_blocks = int(50 * intensity)
-        for _ in range(num_black_blocks):
-            block_size = random.randint(10, int(w * 0.2))
-            x = random.randint(0, max(1, w - block_size))
-            y = random.randint(0, max(1, h - block_size))
-            if x + block_size <= w and y + block_size <= h:
-                frame[y:y+block_size, x:x+block_size] = 0
-    
-    if intensity > 0.3:
-        scale = max(0.1, 1 - intensity * 0.8)
-        small = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_NEAREST)
-        frame = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-    
     return frame
 
 def apply_glitch_effect(frame, intensity):
@@ -167,6 +130,42 @@ def apply_beat_flash(frame, intensity):
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame
+
+def merge_audio_video(video_path, audio_path, output_path, fps=24):
+    """Unisce video e audio usando ffmpeg"""
+    try:
+        # Controlla se ffmpeg è disponibile
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            st.warning("FFmpeg non disponibile. Il video sarà generato senza audio.")
+            return video_path
+        
+        # Comando ffmpeg per unire video e audio
+        cmd = [
+            'ffmpeg', '-y',  # -y per sovrascrivere file esistenti
+            '-i', video_path,
+            '-i', audio_path,
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-strict', 'experimental',
+            '-b:a', '192k',
+            '-r', str(fps),
+            '-shortest',  # Usa la durata del file più corto
+            output_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return output_path
+        else:
+            st.warning(f"Errore FFmpeg: {result.stderr}")
+            return video_path
+            
+    except Exception as e:
+        st.warning(f"Errore nell'unione audio/video: {e}")
+        return video_path
 
 @st.cache_data
 def calculate_bpm(y, sr):
@@ -421,9 +420,9 @@ def main():
                     out_height = height
                 
                 # Preparazione output
-                output_path = os.path.join(temp_dir, "output_video.mp4")
+                temp_video_path = os.path.join(temp_dir, "temp_video.mp4")
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(output_path, fourcc, output_fps, (out_width, out_height))
+                out = cv2.VideoWriter(temp_video_path, fourcc, output_fps, (out_width, out_height))
                 
                 if not out.isOpened():
                     st.error("Errore nella creazione del video di output")
@@ -451,10 +450,13 @@ def main():
                         beat_index += 1
                     
                     # Calcolo intensità bande di frequenza
-                    time_idx = min(int(current_time / t[-1] * len(t)) if len(t) > 0 else 0, len(bass_energy)-1)
-                    bass_value = bass_energy[time_idx] if len(bass_energy) > 0 else 0
-                    mid_value = mid_energy[time_idx] if len(mid_energy) > 0 else 0
-                    treble_value = treble_energy[time_idx] if len(treble_energy) > 0 else 0
+                    if len(t) > 0:
+                        time_idx = min(int(current_time / t[-1] * len(t)), len(bass_energy)-1)
+                        bass_value = bass_energy[time_idx] if len(bass_energy) > 0 else 0
+                        mid_value = mid_energy[time_idx] if len(mid_energy) > 0 else 0
+                        treble_value = treble_energy[time_idx] if len(treble_energy) > 0 else 0
+                    else:
+                        bass_value = mid_value = treble_value = 0
                     
                     # Aggiornamento stato
                     if frame_count % 10 == 0:
@@ -523,50 +525,36 @@ def main():
                 cap.release()
                 out.release()
                 
-                # Unione audio al video
+                # Unione audio al video usando FFmpeg
                 status_text.text("🎵 Unione audio e video...")
-                try:
-                    final_clip = VideoFileClip(output_path)
-                    audio_clip = AudioFileClip(audio_path)
-                    
-                    # Sincronizza durata
-                    min_duration = min(final_clip.duration, audio_clip.duration)
-                    final_clip = final_clip.subclip(0, min_duration)
-                    audio_clip = audio_clip.subclip(0, min_duration)
-                    
-                    final_clip = final_clip.set_audio(audio_clip)
-                    final_output = os.path.join(temp_dir, "final_output.mp4")
-                    final_clip.write_videofile(
-                        final_output, 
-                        codec='libx264', 
-                        audio_codec='aac',
-                        fps=output_fps,
-                        verbose=False,
-                        logger=None
-                    )
-                    
-                    # Chiudi i clip
-                    final_clip.close()
-                    audio_clip.close()
-                    
-                except Exception as e:
-                    st.error(f"Errore nell'unione audio/video: {str(e)}")
-                    return
-                    
+                final_output_path = os.path.join(temp_dir, "final_output.mp4")
+                
+                # Prova a unire con FFmpeg
+                final_video = merge_audio_video(temp_video_path, audio_path, final_output_path, output_fps)
+                
+                if final_video == temp_video_path:
+                    st.warning("⚠️ Video generato senza audio (FFmpeg non disponibile)")
+                    final_video = temp_video_path
+                else:
+                    st.success("✅ Audio unito correttamente!")
+                
                 st.balloons()
                 st.success("✅ Elaborazione completata!")
                 
+                # Leggi il file finale
+                with open(final_video, "rb") as video_file:
+                    video_bytes = video_file.read()
+                
                 # Visualizzazione risultato
                 st.subheader("🎬 Anteprima Video")
-                with open(final_output, "rb") as video_file:
-                    video_bytes = video_file.read()
-                    st.video(video_bytes)
+                st.video(video_bytes)
                 
                 # Download
+                filename = f"glitchfusion_{tempo:.0f}bpm.mp4" if final_video != temp_video_path else "glitchfusion_no_audio.mp4"
                 st.download_button(
                     "💾 Scarica Video", 
                     video_bytes, 
-                    file_name=f"glitchfusion_{tempo:.0f}bpm.mp4",
+                    file_name=filename,
                     mime="video/mp4",
                     use_container_width=True,
                     key="download-btn"
