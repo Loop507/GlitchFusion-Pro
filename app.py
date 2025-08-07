@@ -10,31 +10,127 @@ import subprocess
 from scipy import signal
 
 # ==========================
-# FUNZIONI PER GLI EFFETTI
+# FUNZIONI PER GLI EFFETTI (implementate correttamente)
 # ==========================
 
 def apply_shake_effect(frame, intensity):
-    # ... [codice identico all'originale] ...
+    h, w = frame.shape[:2]
+    max_offset = int(15 * intensity)
+    
+    dx = random.randint(-max_offset, max_offset)
+    dy = random.randint(-max_offset, max_offset)
+    
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    frame = cv2.warpAffine(frame, M, (w, h))
+    
+    frame = cv2.copyMakeBorder(frame, 
+                              abs(dy), abs(dy), 
+                              abs(dx), abs(dx), 
+                              cv2.BORDER_CONSTANT, 
+                              value=[0, 0, 0])
+    
+    frame = frame[abs(dy):h+abs(dy), abs(dx):w+abs(dx)]
+    return frame
 
 def apply_pixelate_effect(frame, intensity):
-    # ... [codice identico all'originale] ...
+    h, w = frame.shape[:2]
+    pixel_size = max(1, int(1 + 15 * intensity))
+    small = cv2.resize(frame, (w // pixel_size, h // pixel_size), interpolation=cv2.INTER_NEAREST)
+    frame = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+    return frame
 
 def apply_color_distortion(frame, intensity):
-    # ... [codice identico all'originale] ...
+    b, g, r = cv2.split(frame)
+    
+    shift_b = int(10 * intensity * random.choice([-1, 1]))
+    shift_g = int(8 * intensity * random.choice([-1, 1]))
+    shift_r = int(6 * intensity * random.choice([-1, 1]))
+    
+    b = np.roll(b, shift_b, axis=0)
+    g = np.roll(g, shift_g, axis=1)
+    r = np.roll(r, shift_r, axis=(0, 1))
+    
+    frame = cv2.merge((b, g, r))
+    
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1 + intensity), 0, 255).astype(np.uint8)
+    frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    
+    return frame
 
 def apply_tv_noise_effect(frame, intensity):
-    # ... [codice identico all'originale] ...
+    h, w = frame.shape[:2]
+    
+    num_lines = int(20 * intensity)
+    for _ in range(num_lines):
+        y = random.randint(0, h-1)
+        thickness = random.randint(1, 3)
+        color = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+        cv2.line(frame, (0, y), (w, y), color, thickness)
+    
+    noise = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+    frame = cv2.addWeighted(frame, 1 - intensity*0.5, noise, intensity*0.5, 0)
+    
+    if random.random() < intensity:
+        frame = frame // 2
+    
+    return frame
 
 def apply_digital_corruption_effect(frame, intensity):
-    # ... [codice identico all'originale] ...
+    h, w = frame.shape[:2]
+    
+    block_size = max(4, int(32 * (1 - intensity)))
+    for y in range(0, h, block_size):
+        for x in range(0, w, block_size):
+            if random.random() < intensity * 0.8:
+                block_h = min(block_size + random.randint(-10, 20), h - y)
+                block_w = min(block_size + random.randint(-10, 20), w - x)
+                
+                if block_h <= 0 or block_w <= 0:
+                    continue
+                
+                offset_x = random.randint(-int(w * 0.1), int(w * 0.1))
+                offset_y = random.randint(-int(h * 0.1), int(h * 0.1))
+                
+                block = frame[y:y+block_h, x:x+block_w].copy()
+                new_x = max(0, min(w - block_w, x + offset_x))
+                new_y = max(0, min(h - block_h, y + offset_y))
+                
+                if random.random() < 0.7 and block.size > 0:
+                    block = cv2.cvtColor(block, cv2.COLOR_BGR2HSV)
+                    block[:, :, 0] = (block[:, :, 0] + random.randint(0, 180)) % 180
+                    block = cv2.cvtColor(block, cv2.COLOR_HSV2BGR)
+                
+                if new_y + block_h <= h and new_x + block_w <= w:
+                    frame[new_y:new_y+block_h, new_x:new_x+block_w] = block
+    
+    return frame
 
 def apply_glitch_effect(frame, intensity):
-    # ... [codice identico all'originale] ...
+    h, w = frame.shape[:2]
+    
+    if intensity > 0.3:
+        shift = int(intensity * 50)
+        for i in range(0, h, 5):
+            if i < h:
+                frame[i] = np.roll(frame[i], shift * (i % 3 - 1), axis=0)
+    
+    if intensity > 0.4:
+        b, g, r = cv2.split(frame)
+        frame = cv2.merge((
+            np.roll(b, int(intensity * 10)),
+            np.roll(g, int(intensity * -5)),
+            r
+        ))
+    
+    return frame
 
 def apply_beat_flash(frame, intensity):
-    # ... [codice identico all'originale] ...
+    if intensity > 0.8:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    return frame
 
-# FUNZIONE MANCANTE AGGIUNTA QUI
 def merge_audio_video(video_path, audio_path, output_path, fps=24):
     """Unisce video e audio usando ffmpeg"""
     try:
@@ -73,11 +169,71 @@ def merge_audio_video(video_path, audio_path, output_path, fps=24):
 
 @st.cache_data
 def calculate_bpm(y, sr):
-    # ... [codice identico all'originale] ...
+    """Calcola il BPM usando autocorrelazione"""
+    try:
+        # Calcola l'autocorrelazione
+        corr = np.correlate(y, y, mode='full')
+        corr = corr[len(corr)//2:]
+        
+        # Trova i picchi
+        min_peak_distance = sr // 4  # Almeno 0.25 secondi tra i picchi
+        peaks = []
+        for i in range(1, len(corr)-1):
+            if corr[i] > corr[i-1] and corr[i] > corr[i+1] and corr[i] > np.max(corr)*0.1:
+                if not peaks or i - peaks[-1] > min_peak_distance:
+                    peaks.append(i)
+        
+        # Calcola il BPM
+        if len(peaks) > 1:
+            peak_diffs = np.diff(peaks)
+            avg_peak_diff = np.mean(peak_diffs)
+            bpm = 60 / (avg_peak_diff / sr)
+            return min(200, max(60, bpm))  # Limita tra 60 e 200 BPM
+        return 120  # Valore di default
+    except Exception as e:
+        st.warning(f"Errore nel calcolo BPM: {e}")
+        return 120
 
 @st.cache_data
 def analyze_audio(audio_data, sr):
-    # ... [codice identico all'originale] ...
+    """Analizza l'audio e restituisce le energie delle bande"""
+    try:
+        # Converti in mono se necessario
+        if audio_data.ndim > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        # Calcolo spettrogramma
+        f, t, Sxx = signal.spectrogram(audio_data, fs=sr, nperseg=1024, noverlap=512)
+        
+        # Definizione bande di frequenza
+        bass_band = (20, 200)
+        mid_band = (200, 2000)
+        treble_band = (2000, 10000)
+        
+        # Calcolo indici
+        bass_idx = np.where((f >= bass_band[0]) & (f <= bass_band[1]))[0]
+        mid_idx = np.where((f >= mid_band[0]) & (f <= mid_band[1]))[0]
+        treble_idx = np.where((f >= treble_band[0]) & (f <= treble_band[1]))[0]
+        
+        # Calcolo energie
+        bass_energy = np.mean(Sxx[bass_idx, :], axis=0) if len(bass_idx) > 0 else np.zeros(Sxx.shape[1])
+        mid_energy = np.mean(Sxx[mid_idx, :], axis=0) if len(mid_idx) > 0 else np.zeros(Sxx.shape[1])
+        treble_energy = np.mean(Sxx[treble_idx, :], axis=0) if len(treble_idx) > 0 else np.zeros(Sxx.shape[1])
+        
+        # Normalizzazione
+        def normalize(arr):
+            if np.max(arr) - np.min(arr) > 0:
+                return (arr - np.min(arr)) / (np.max(arr) - np.min(arr))
+            return np.zeros_like(arr)
+        
+        bass_energy = normalize(bass_energy)
+        mid_energy = normalize(mid_energy)
+        treble_energy = normalize(treble_energy)
+        
+        return bass_energy, mid_energy, treble_energy, t
+    except Exception as e:
+        st.error(f"Errore nell'analisi audio: {e}")
+        return None, None, None, None
 
 # ==========================
 # INTERFACCIA STREAMLIT MODIFICATA
