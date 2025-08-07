@@ -1,45 +1,12 @@
 [server]
-# Aumenta la dimensione massima dei file caricabili (in MB)
-maxUploadSize = 500
-
-# Timeout per l'avvio del server (in secondi)
-serverAddress = "0.0.0.0"
-headless = true
-enableCORS = false
-enableXsrfProtection = true
+maxUploadSize = 200
+maxMessageSize = 200
 
 [browser]
-# Configurazioni del browser
 gatherUsageStats = false
-serverAddress = "localhost"
-
-[runner]
-# Configurazioni dell'esecuzione
-magicEnabled = false
-fixMatplotlib = true
-
-[client]
-# Mostra dettagli degli errori
-showErrorDetails = true
-
-[mapbox]
-# Disabilita Mapbox per ridurre le dipendenze
-token = ""
 
 [theme]
-# Tema personalizzato per GlitchFusion Pro
-base = "dark"
-primaryColor = "#8A2BE2"  # Viola di GlitchFusion
+primaryColor = "#8A2BE2"
 backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#192841"
+secondaryBackgroundColor = "#262730"
 textColor = "#FAFAFA"
-font = "sans serif"
-
-[scheduler]
-# Ottimizzazione per elaborazioni lunghe
-maxMessageSize = 500
-
-[deprecation]
-# Disabilita avvisi di deprecazione
-showfileUploaderEncoding = false
-showPyplotGlobalUse = false
