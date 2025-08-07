@@ -8,6 +8,11 @@ import soundfile as sf
 import shutil
 import subprocess
 from scipy import signal
+import librosa
+import moviepy.editor as mp
+from moviepy.audio.AudioClip import AudioArrayClip
+import warnings
+warnings.filterwarnings('ignore')
 
 # ==========================
 # FUNZIONI PER GLI EFFETTI
@@ -131,15 +136,53 @@ def apply_beat_flash(frame, intensity):
         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame
 
-def merge_audio_video(video_path, audio_path, output_path, fps=24):
-    """Unisce video e audio usando ffmpeg"""
+def merge_audio_video_moviepy(video_path, audio_path, output_path, fps=24):
+    """Unisce video e audio usando MoviePy (più affidabile di FFmpeg)"""
+    try:
+        # Carica video e audio
+        video = mp.VideoFileClip(video_path)
+        audio = mp.AudioFileClip(audio_path)
+        
+        # Taglia l'audio alla durata del video se necessario
+        if audio.duration > video.duration:
+            audio = audio.subclip(0, video.duration)
+        elif video.duration > audio.duration:
+            video = video.subclip(0, audio.duration)
+        
+        # Unisce video e audio
+        final_clip = video.set_audio(audio)
+        
+        # Salva il risultato
+        final_clip.write_videofile(
+            output_path,
+            fps=fps,
+            codec='libx264',
+            audio_codec='aac',
+            temp_audiofile='temp-audio.m4a',
+            remove_temp=True,
+            verbose=False,
+            logger=None
+        )
+        
+        # Pulizia
+        video.close()
+        audio.close()
+        final_clip.close()
+        
+        return output_path
+        
+    except Exception as e:
+        st.warning(f"Errore MoviePy: {e}")
+        return video_path
+
+def merge_audio_video_ffmpeg(video_path, audio_path, output_path, fps=24):
+    """Unisce video e audio usando ffmpeg (fallback)"""
     try:
         # Controlla se ffmpeg è disponibile
         result = subprocess.run(['ffmpeg', '-version'], 
                               capture_output=True, text=True)
         if result.returncode != 0:
-            st.warning("FFmpeg non disponibile. Il video sarà generato senza audio.")
-            return video_path
+            return None
         
         # Comando ffmpeg per unire video e audio
         cmd = [
@@ -160,16 +203,31 @@ def merge_audio_video(video_path, audio_path, output_path, fps=24):
         if result.returncode == 0:
             return output_path
         else:
-            st.warning(f"Errore FFmpeg: {result.stderr}")
-            return video_path
+            return None
             
     except Exception as e:
-        st.warning(f"Errore nell'unione audio/video: {e}")
-        return video_path
+        return None
 
 @st.cache_data
-def calculate_bpm(y, sr):
-    """Calcola il BPM usando autocorrelazione"""
+def calculate_bpm_improved(y, sr):
+    """Calcola il BPM usando librosa (più preciso)"""
+    try:
+        # Usa librosa per il beat tracking
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=512)
+        
+        # Se librosa fallisce, usa il metodo di autocorrelazione
+        if tempo is None or tempo == 0:
+            return calculate_bpm_autocorr(y, sr)
+            
+        return float(tempo)
+        
+    except Exception as e:
+        st.warning(f"Errore nel calcolo BPM con librosa: {e}")
+        return calculate_bpm_autocorr(y, sr)
+
+@st.cache_data
+def calculate_bpm_autocorr(y, sr):
+    """Calcola il BPM usando autocorrelazione (metodo originale)"""
     try:
         # Calcola l'autocorrelazione
         corr = np.correlate(y, y, mode='full')
@@ -195,8 +253,61 @@ def calculate_bpm(y, sr):
         return 120
 
 @st.cache_data
-def analyze_audio(audio_data, sr):
-    """Analizza l'audio e restituisce le energie delle bande"""
+def analyze_audio_improved(audio_data, sr):
+    """Analizza l'audio usando librosa per migliori risultati"""
+    try:
+        # Converti in mono se necessario
+        if audio_data.ndim > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        # Calcolo spettrogramma con librosa
+        S = librosa.stft(audio_data, hop_length=512, n_fft=2048)
+        S_magnitude = np.abs(S)
+        
+        # Frequenze corrispondenti
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        
+        # Definizione bande di frequenza migliorate
+        bass_band = (20, 250)
+        mid_band = (250, 4000)
+        treble_band = (4000, sr//2)
+        
+        # Calcolo indici
+        bass_idx = np.where((freqs >= bass_band[0]) & (freqs <= bass_band[1]))[0]
+        mid_idx = np.where((freqs >= mid_band[0]) & (freqs <= mid_band[1]))[0]
+        treble_idx = np.where((freqs >= treble_band[0]) & (freqs <= treble_band[1]))[0]
+        
+        # Calcolo energie
+        bass_energy = np.mean(S_magnitude[bass_idx, :], axis=0) if len(bass_idx) > 0 else np.zeros(S_magnitude.shape[1])
+        mid_energy = np.mean(S_magnitude[mid_idx, :], axis=0) if len(mid_idx) > 0 else np.zeros(S_magnitude.shape[1])
+        treble_energy = np.mean(S_magnitude[treble_idx, :], axis=0) if len(treble_idx) > 0 else np.zeros(S_magnitude.shape[1])
+        
+        # Normalizzazione con smoothing
+        def normalize_smooth(arr):
+            if np.max(arr) - np.min(arr) > 0:
+                normalized = (arr - np.min(arr)) / (np.max(arr) - np.min(arr))
+                # Applica smoothing
+                from scipy.ndimage import uniform_filter1d
+                return uniform_filter1d(normalized, size=3)
+            return np.zeros_like(arr)
+        
+        bass_energy = normalize_smooth(bass_energy)
+        mid_energy = normalize_smooth(mid_energy)
+        treble_energy = normalize_smooth(treble_energy)
+        
+        # Tempo corrispondente
+        t = librosa.frames_to_time(np.arange(S_magnitude.shape[1]), sr=sr, hop_length=512)
+        
+        return bass_energy, mid_energy, treble_energy, t
+        
+    except Exception as e:
+        st.error(f"Errore nell'analisi audio con librosa: {e}")
+        # Fallback al metodo originale
+        return analyze_audio_fallback(audio_data, sr)
+
+@st.cache_data
+def analyze_audio_fallback(audio_data, sr):
+    """Analisi audio con metodo originale (fallback)"""
     try:
         # Converti in mono se necessario
         if audio_data.ndim > 1:
@@ -267,10 +378,17 @@ def main():
         .stProgress .st-bo {
             background-color: #8A2BE2;
         }
+        .success-box {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 0.375rem;
+            padding: 0.75rem;
+            margin: 1rem 0;
+        }
         </style>
         
         <h1 class="app-header">GlitchFusion Pro</h1>
-        <p class="app-subheader">by Loop507</p>
+        <p class="app-subheader">by Loop507 - Versione Migliorata</p>
         """,
         unsafe_allow_html=True
     )
@@ -308,6 +426,15 @@ def main():
             enable_corruption = st.checkbox("Corruzione Digitale", True)
             enable_glitch = st.checkbox("Glitch", True)
             enable_flash = st.checkbox("Flash Battiti", True)
+        
+        st.subheader("🔧 Opzioni Avanzate")
+        audio_method = st.selectbox(
+            "Metodo Unione Audio",
+            ["MoviePy (Consigliato)", "FFmpeg", "Auto"],
+            index=0
+        )
+        
+        improve_analysis = st.checkbox("Analisi Audio Migliorata (Librosa)", True)
     
     # Area principale
     col1, col2 = st.columns([1, 1])
@@ -315,13 +442,13 @@ def main():
     with col1:
         st.subheader("📤 Caricamento File")
         video_file = st.file_uploader(
-            "Carica video (MP4, AVI)", 
-            type=["mp4", "avi"],
+            "Carica video (MP4, AVI, MOV)", 
+            type=["mp4", "avi", "mov"],
             help="Dimensione massima: 200MB"
         )
         audio_file = st.file_uploader(
-            "Carica brano audio (MP3, WAV)", 
-            type=["mp3", "wav"],
+            "Carica brano audio (MP3, WAV, M4A)", 
+            type=["mp3", "wav", "m4a"],
             help="Dimensione massima: 200MB"
         )
     
@@ -333,6 +460,12 @@ def main():
         2. Regola i parametri nella sidebar
         3. Clicca "Elabora Video"
         4. Scarica il risultato
+        
+        **Novità v2.0:**
+        - 🎵 Audio integrato automaticamente
+        - 🎯 Analisi BPM migliorata con Librosa
+        - 🎬 Supporto MoviePy per unione A/V
+        - 🔧 Opzioni avanzate configurabili
         """)
         st.warning("⚠️ Per video lunghi l'elaborazione potrebbe richiedere tempo. Consigliati video di 10-30 secondi.")
         
@@ -340,20 +473,18 @@ def main():
             st.success("✅ File caricati correttamente!")
     
     # Controlli di validazione
-    if video_file:
-        if video_file.size > 200 * 1024 * 1024:  # 200MB
-            st.error("❌ Il video è troppo grande. Massimo 200MB.")
-            return
+    if video_file and video_file.size > 200 * 1024 * 1024:  # 200MB
+        st.error("❌ Il video è troppo grande. Massimo 200MB.")
+        return
     
-    if audio_file:
-        if audio_file.size > 200 * 1024 * 1024:  # 200MB
-            st.error("❌ Il file audio è troppo grande. Massimo 200MB.")
-            return
+    if audio_file and audio_file.size > 200 * 1024 * 1024:  # 200MB
+        st.error("❌ Il file audio è troppo grande. Massimo 200MB.")
+        return
 
     if st.button("🎬 Elabora Video", type="primary", use_container_width=True) and video_file and audio_file:
         temp_dir = None
         try:
-            with st.spinner("Analisi audio e elaborazione video..."):
+            with st.spinner("🔍 Analisi audio e elaborazione video in corso..."):
                 # Crea directory temporanea
                 temp_dir = tempfile.mkdtemp()
                 
@@ -370,33 +501,45 @@ def main():
 
                 # Analisi audio
                 try:
+                    st.info("🎵 Caricamento e analisi audio...")
+                    
                     # Caricamento audio
                     y, sr = sf.read(audio_path)
                     
-                    # Analisi audio con cache
-                    bass_energy, mid_energy, treble_energy, t = analyze_audio(y, sr)
+                    # Analisi audio (migliorata o standard)
+                    if improve_analysis:
+                        bass_energy, mid_energy, treble_energy, t = analyze_audio_improved(y, sr)
+                        tempo = calculate_bpm_improved(y, sr)
+                    else:
+                        bass_energy, mid_energy, treble_energy, t = analyze_audio_fallback(y, sr)
+                        tempo = calculate_bpm_autocorr(y, sr)
                     
                     if bass_energy is None:
-                        st.error("Errore nell'analisi audio")
+                        st.error("❌ Errore nell'analisi audio")
                         return
-                    
-                    # Calcolo BPM
-                    tempo = calculate_bpm(y, sr)
                     
                     # Calcolo battiti
                     beat_interval = 60 / tempo
                     total_time = len(y) / sr
                     beat_times = np.arange(0, total_time, beat_interval)
                     
-                    st.success(f"🎶 BPM Stimati: {tempo:.1f} | Battiti: {len(beat_times)}")
+                    st.markdown(f"""
+                    <div class="success-box">
+                        🎶 <strong>BPM Stimati:</strong> {tempo:.1f} | 
+                        🥁 <strong>Battiti:</strong> {len(beat_times)} | 
+                        ⏱️ <strong>Durata:</strong> {total_time:.1f}s
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
                 except Exception as e:
-                    st.error(f"Errore nell'analisi audio: {str(e)}")
+                    st.error(f"❌ Errore nell'analisi audio: {str(e)}")
                     return
 
                 # Apertura video
+                st.info("🎬 Elaborazione video...")
                 cap = cv2.VideoCapture(video_path)
                 if not cap.isOpened():
-                    st.error("Errore nell'apertura del video")
+                    st.error("❌ Errore nell'apertura del video")
                     return
                     
                 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -425,7 +568,7 @@ def main():
                 out = cv2.VideoWriter(temp_video_path, fourcc, output_fps, (out_width, out_height))
                 
                 if not out.isOpened():
-                    st.error("Errore nella creazione del video di output")
+                    st.error("❌ Errore nella creazione del video di output")
                     return
                     
                 # Elaborazione frame-by-frame
@@ -460,9 +603,10 @@ def main():
                     
                     # Aggiornamento stato
                     if frame_count % 10 == 0:
-                        status_text.text(f"📊 Frame: {frame_count}/{total_frames} | Progresso: {frame_count/total_frames*100:.1f}%")
+                        progress_percent = (frame_count/total_frames) * 100
+                        status_text.text(f"📊 Frame: {frame_count}/{total_frames} | Progresso: {progress_percent:.1f}%")
                     
-                    # Applicazione effetti
+                    # Applicazione effetti con gestione errori migliorata
                     try:
                         if enable_shake and bass_value > bass_intensity * 0.8:
                             frame = apply_shake_effect(frame, bass_value * bass_intensity)
@@ -485,7 +629,7 @@ def main():
                         if enable_glitch and bass_value > 0.5:
                             frame = apply_glitch_effect(frame, bass_value)
                     except Exception as e:
-                        st.warning(f"Errore nell'applicazione effetti al frame {frame_count}: {e}")
+                        st.warning(f"⚠️ Errore nell'applicazione effetti al frame {frame_count}: {e}")
                     
                     # Ritaglio in base al rapporto d'aspetto
                     if aspect_ratio != "Originale":
@@ -525,34 +669,82 @@ def main():
                 cap.release()
                 out.release()
                 
-                # Unione audio al video usando FFmpeg
+                # Unione audio al video
                 status_text.text("🎵 Unione audio e video...")
                 final_output_path = os.path.join(temp_dir, "final_output.mp4")
                 
-                # Prova a unire con FFmpeg
-                final_video = merge_audio_video(temp_video_path, audio_path, final_output_path, output_fps)
+                # Strategia di unione basata sulla selezione utente
+                audio_success = False
                 
-                if final_video == temp_video_path:
-                    st.warning("⚠️ Video generato senza audio (FFmpeg non disponibile)")
+                if audio_method == "MoviePy (Consigliato)" or audio_method == "Auto":
+                    try:
+                        final_video = merge_audio_video_moviepy(temp_video_path, audio_path, final_output_path, output_fps)
+                        if final_video == final_output_path:
+                            audio_success = True
+                            st.success("✅ Audio unito con MoviePy!")
+                    except Exception as e:
+                        st.warning(f"⚠️ MoviePy fallito: {e}")
+                
+                # Fallback FFmpeg se MoviePy fallisce
+                if not audio_success and (audio_method == "FFmpeg" or audio_method == "Auto"):
+                    try:
+                        final_video = merge_audio_video_ffmpeg(temp_video_path, audio_path, final_output_path, output_fps)
+                        if final_video == final_output_path:
+                            audio_success = True
+                            st.success("✅ Audio unito con FFmpeg!")
+                    except Exception as e:
+                        st.warning(f"⚠️ FFmpeg fallito: {e}")
+                
+                # Se entrambi falliscono, usa solo il video
+                if not audio_success:
+                    st.warning("⚠️ Video generato senza audio (nessun metodo di unione disponibile)")
                     final_video = temp_video_path
-                else:
-                    st.success("✅ Audio unito correttamente!")
                 
                 st.balloons()
-                st.success("✅ Elaborazione completata!")
+                st.success("🎉 Elaborazione completata con successo!")
                 
                 # Leggi il file finale
-                with open(final_video, "rb") as video_file:
-                    video_bytes = video_file.read()
+                with open(final_video, "rb") as video_file_final:
+                    video_bytes = video_file_final.read()
                 
-                # Visualizzazione risultato
-                st.subheader("🎬 Anteprima Video")
-                st.video(video_bytes)
+                # Visualizzazione risultato con colonne
+                st.markdown("---")
+                st.subheader("🎬 Risultato Finale")
                 
-                # Download
-                filename = f"glitchfusion_{tempo:.0f}bpm.mp4" if final_video != temp_video_path else "glitchfusion_no_audio.mp4"
+                col_result1, col_result2 = st.columns([2, 1])
+                
+                with col_result1:
+                    st.video(video_bytes)
+                
+                with col_result2:
+                    st.markdown("### 📊 Statistiche")
+                    st.metric("BPM", f"{tempo:.1f}")
+                    st.metric("Durata", f"{total_time:.1f}s")
+                    st.metric("Risoluzione", f"{out_width}x{out_height}")
+                    st.metric("FPS Output", output_fps)
+                    
+                    file_size_mb = len(video_bytes) / (1024 * 1024)
+                    st.metric("Dimensione File", f"{file_size_mb:.1f} MB")
+                    
+                    # Indica se ha audio
+                    audio_status = "✅ Con Audio" if audio_success else "❌ Solo Video"
+                    st.markdown(f"**Audio:** {audio_status}")
+                
+                # Download con nome personalizzato
+                timestamp = int(tempo)
+                effects_used = []
+                if enable_shake: effects_used.append("shake")
+                if enable_pixelate: effects_used.append("pixel")
+                if enable_tv_noise: effects_used.append("noise")
+                if enable_color: effects_used.append("color")
+                if enable_corruption: effects_used.append("corrupt")
+                if enable_glitch: effects_used.append("glitch")
+                
+                effects_str = "_".join(effects_used[:3])  # Primi 3 effetti
+                filename = f"glitchfusion_{timestamp}bpm_{effects_str}.mp4"
+                
                 st.download_button(
-                    "💾 Scarica Video", 
+                    "💾 Scarica Video Processato", 
                     video_bytes, 
                     file_name=filename,
                     mime="video/mp4",
@@ -560,22 +752,70 @@ def main():
                     key="download-btn"
                 )
                 
+                # Informazioni tecniche aggiuntive
+                with st.expander("🔧 Dettagli Tecnici"):
+                    st.json({
+                        "BPM_Calcolato": round(tempo, 2),
+                        "Metodo_Audio": "Librosa" if improve_analysis else "Autocorrelazione",
+                        "Unione_Audio": audio_method,
+                        "Effetti_Attivi": effects_used,
+                        "Risoluzione_Originale": f"{width}x{height}",
+                        "Risoluzione_Output": f"{out_width}x{out_height}",
+                        "FPS_Originale": round(fps, 2),
+                        "FPS_Output": output_fps,
+                        "Frame_Totali": total_frames,
+                        "Durata_Secondi": round(total_time, 2),
+                        "Audio_Incluso": audio_success
+                    })
+                
         except Exception as e:
-            st.error(f"❌ Errore generale: {str(e)}")
-            st.exception(e)
+            st.error(f"❌ Errore generale nell'elaborazione: {str(e)}")
+            with st.expander("🐛 Dettagli Errore"):
+                st.exception(e)
             
         finally:
             # Pulizia garantita
             if temp_dir and os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    st.success("🧹 Pulizia completata")
+                    st.success("🧹 File temporanei puliti")
                 except Exception as e:
                     st.warning(f"⚠️ Errore nella pulizia: {e}")
-
-    # Footer
+    
+    # Sezione informativa aggiuntiva
+    with st.expander("📖 Guida agli Effetti"):
+        st.markdown("""
+        ### 🎨 Descrizione Effetti:
+        
+        - **🟢 Shake**: Movimento casuale sincronizzato con i bassi
+        - **🟣 Pixel Art**: Pixelizzazione dinamica sui medi
+        - **⚡ TV Noise**: Disturbi TV sui suoni acuti  
+        - **🌈 Distorsione Colori**: Separazione RGB e saturazione
+        - **💥 Corruzione Digitale**: Blocchi corrotti e spostati
+        - **⚡ Glitch**: Effetto glitch su linee orizzontali
+        - **✨ Flash Battiti**: Flash bianco e nero sui beat
+        
+        ### 🎚️ Consigli per i Parametri:
+        
+        - **Bassi alti (0.8-1.0)**: Per musica elettronica/hip-hop
+        - **Medi alti (0.6-0.8)**: Per rock/pop con chitarre
+        - **Acuti alti (0.5-0.7)**: Per musica con molti dettagli
+        - **FPS bassi (15-20)**: Effetto più cinematografico
+        - **FPS alti (24-30)**: Movimento più fluido
+        """)
+    
+    # Footer migliorato
     st.markdown("---")
-    st.markdown("*GlitchFusion Pro v2.0 - Trasforma i tuoi video in esperienze audiovisive uniche*")
+    st.markdown(
+        """
+        <div style='text-align: center; color: #666; padding: 20px;'>
+            <strong>GlitchFusion Pro v2.0</strong> - Trasforma i tuoi video in esperienze audiovisive uniche<br>
+            🎵 Analisi audio avanzata | 🎬 Effetti sincronizzati | 🚀 Performance ottimizzate<br>
+            <em>Creato con ❤️ da Loop507</em>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main()
