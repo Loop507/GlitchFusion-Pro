@@ -10,10 +10,74 @@ import subprocess
 from scipy import signal
 
 # ==========================
-# FUNZIONI PER GLI EFFETTI (rimangono identiche)
+# FUNZIONI PER GLI EFFETTI
 # ==========================
 
-# ... [Le funzioni apply_* rimangono identiche] ...
+def apply_shake_effect(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_pixelate_effect(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_color_distortion(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_tv_noise_effect(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_digital_corruption_effect(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_glitch_effect(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+def apply_beat_flash(frame, intensity):
+    # ... [codice identico all'originale] ...
+
+# FUNZIONE MANCANTE AGGIUNTA QUI
+def merge_audio_video(video_path, audio_path, output_path, fps=24):
+    """Unisce video e audio usando ffmpeg"""
+    try:
+        # Controlla se ffmpeg è disponibile
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            st.warning("FFmpeg non disponibile. Il video sarà generato senza audio.")
+            return video_path
+        
+        # Comando ffmpeg per unire video e audio
+        cmd = [
+            'ffmpeg', '-y',  # -y per sovrascrivere file esistenti
+            '-i', video_path,
+            '-i', audio_path,
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-strict', 'experimental',
+            '-b:a', '192k',
+            '-r', str(fps),
+            '-shortest',  # Usa la durata del file più corto
+            output_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return output_path
+        else:
+            st.warning(f"Errore FFmpeg: {result.stderr}")
+            return video_path
+            
+    except Exception as e:
+        st.warning(f"Errore nell'unione audio/video: {e}")
+        return video_path
+
+@st.cache_data
+def calculate_bpm(y, sr):
+    # ... [codice identico all'originale] ...
+
+@st.cache_data
+def analyze_audio(audio_data, sr):
+    # ... [codice identico all'originale] ...
 
 # ==========================
 # INTERFACCIA STREAMLIT MODIFICATA
@@ -175,7 +239,6 @@ def main():
                 
                 # Gestione audio
                 audio_path = None
-                extracted_audio = False
                 
                 # Caso 1: audio fornito dall'utente
                 if audio_file:
@@ -198,8 +261,6 @@ def main():
                     if result.returncode != 0 or not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
                         st.warning("⚠️ Impossibile estrarre audio dal video. Procedo senza audio.")
                         audio_path = None
-                    else:
-                        extracted_audio = True
 
                 # Analisi audio (solo se disponibile)
                 bass_energy, mid_energy, treble_energy, t = None, None, None, None
