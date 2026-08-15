@@ -551,6 +551,13 @@ def main():
         prev_frame  = None
         echo_buffer = deque(maxlen=6)  # buffer per frame echo
 
+        # Conversione framerate: se output_fps != fps originale, scrivere
+        # i frame 1:1 comprime/allunga la durata (bug: video accorciato/allungato).
+        # Con questo accumulatore i frame vengono duplicati o saltati in modo
+        # da preservare la durata reale del video sorgente.
+        frame_ratio = (output_fps / fps) if fps > 0 else 1.0
+        write_carry = 0.0
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -651,7 +658,13 @@ def main():
                         frame = frame[(fh-th)//2:(fh-th)//2+th, :]
 
             frame = cv2.resize(frame, (out_w, out_h))
-            out.write(frame)
+
+            # Scrive il frame N volte (0, 1 o più) in base al rapporto tra
+            # fps originale e fps di output, così la durata resta corretta.
+            write_carry += frame_ratio
+            while write_carry >= 1.0:
+                out.write(frame)
+                write_carry -= 1.0
 
             progress_bar.progress(min(frame_count / max(total_frames, 1), 1.0))
             if frame_count % 30 == 0:
