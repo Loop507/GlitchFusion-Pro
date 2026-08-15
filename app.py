@@ -340,6 +340,28 @@ def merge_audio_video(video_path, audio_path, output_path, fps=24):
         st.warning(f"Errore merge audio/video: {e}")
         return video_path
 
+def make_preview_480p(video_path, temp_dir):
+    """
+    Genera una versione leggera (altezza 480px) del video solo per l'anteprima
+    a schermo: velocizza il caricamento nel browser senza toccare il file
+    finale che viene offerto in download (che resta a piena qualità).
+    """
+    preview_path = os.path.join(temp_dir, "preview_480p.mp4")
+    try:
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-vf', "scale=-2:480:flags=fast_bilinear",
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30',
+            '-c:a', 'aac', '-b:a', '96k',
+            preview_path
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode == 0 and os.path.exists(preview_path) and os.path.getsize(preview_path) > 0:
+            return preview_path
+    except Exception:
+        pass
+    return video_path  # fallback: mostra il video originale se la conversione fallisce
+
 # ============================================================
 # UI HELPER
 # ============================================================
@@ -545,7 +567,7 @@ def main():
 
             # Energia bande per il frame corrente
             def band_val(energy_arr):
-                if energy_arr is None or t_arr is None or len(t_arr) == 0:
+                if energy_arr is None or t_arr is None or len(t_arr) == 0 or t_arr[-1] <= 0:
                     return 0.0
                 idx = min(int(current_time / t_arr[-1] * len(t_arr)), len(energy_arr) - 1)
                 return float(energy_arr[idx])
@@ -560,13 +582,13 @@ def main():
 
             try:
                 # --- EFFETTI COSMETICI ---
-                if en_shake and (bv > shake_b * 0.5 or mv > shake_m * 0.5):
+                if en_shake and (bv > shake_b * 0.5 or mv > shake_m * 0.5 or tv > shake_t * 0.5):
                     frame = apply_shake_effect(frame, intensity(bv, shake_b, mv, shake_m, tv, shake_t, shake_max))
 
-                if en_pixel and (mv > pixel_m * 0.5 or tv > pixel_t * 0.5):
+                if en_pixel and (bv > pixel_b * 0.5 or mv > pixel_m * 0.5 or tv > pixel_t * 0.5):
                     frame = apply_pixelate_effect(frame, intensity(bv, pixel_b, mv, pixel_m, tv, pixel_t, pixel_max))
 
-                if en_tv and tv > tv_t * 0.5:
+                if en_tv and (bv > tv_b * 0.5 or mv > tv_m * 0.5 or tv > tv_t * 0.5):
                     frame = apply_tv_noise_effect(frame, intensity(bv, tv_b, mv, tv_m, tv, tv_t, tv_max))
 
                 if en_color and (bv > color_b * 0.5 or mv > color_m * 0.5 or tv > color_t * 0.5):
@@ -576,27 +598,27 @@ def main():
                     frame = apply_beat_flash(frame, beat_intensity)
 
                 # --- EFFETTI DISTRUTTIVI ---
-                if en_disp and (bv > disp_b * 0.5 or mv > disp_m * 0.5):
+                if en_disp and (bv > disp_b * 0.5 or mv > disp_m * 0.5 or tv > disp_t * 0.5):
                     i_val = intensity(bv, disp_b, mv, disp_m, tv, disp_t, disp_max)
                     frame = apply_displacement_map(frame, i_val, prev_frame)
 
-                if en_sort and (mv > sort_m * 0.5 or tv > sort_t * 0.5):
+                if en_sort and (bv > sort_b * 0.5 or mv > sort_m * 0.5 or tv > sort_t * 0.5):
                     i_val = intensity(bv, sort_b, mv, sort_m, tv, sort_t, sort_max)
                     frame = apply_pixel_sort(frame, i_val)
 
-                if en_mosh and bv > mosh_b * 0.5:
+                if en_mosh and (bv > mosh_b * 0.5 or mv > mosh_m * 0.5 or tv > mosh_t * 0.5):
                     i_val = intensity(bv, mosh_b, mv, mosh_m, tv, mosh_t, mosh_max)
                     frame = apply_datamosh(frame, prev_frame, i_val)
 
-                if en_echo and (bv > echo_b * 0.5 or mv > echo_m * 0.5):
+                if en_echo and (bv > echo_b * 0.5 or mv > echo_m * 0.5 or tv > echo_t * 0.5):
                     i_val = intensity(bv, echo_b, mv, echo_m, tv, echo_t, echo_max)
                     frame = apply_frame_echo(frame, echo_buffer, i_val)
 
-                if en_corrupt and bv > corr_b * 0.5:
+                if en_corrupt and (bv > corr_b * 0.5 or mv > corr_m * 0.5 or tv > corr_t * 0.5):
                     i_val = intensity(bv, corr_b, mv, corr_m, tv, corr_t, corr_max)
                     frame = apply_digital_corruption_effect(frame, i_val)
 
-                if en_glitch and (bv > glit_b * 0.5 or mv > glit_m * 0.5):
+                if en_glitch and (bv > glit_b * 0.5 or mv > glit_m * 0.5 or tv > glit_t * 0.5):
                     i_val = intensity(bv, glit_b, mv, glit_m, tv, glit_t, glit_max)
                     frame = apply_glitch_lines(frame, i_val)
 
@@ -643,7 +665,10 @@ def main():
         if include_audio and audio_path:
             status_text.text("🎵 Unione audio e video...")
             final_video = merge_audio_video(temp_video, audio_path, final_path, output_fps)
-            st.success("✅ Audio unito!")
+            if final_video == final_path and os.path.exists(final_path):
+                st.success("✅ Audio unito!")
+            else:
+                st.warning("⚠️ Audio non unito (FFmpeg non disponibile o errore). Output solo video.")
         else:
             final_video = temp_video
 
@@ -654,8 +679,18 @@ def main():
         with open(final_video, "rb") as vf:
             video_bytes = vf.read()
 
-        st.subheader("🎬 Anteprima")
-        st.video(video_bytes)
+        status_text.text("🖼️ Genero anteprima leggera (480p)...")
+        preview_path = make_preview_480p(final_video, temp_dir)
+        status_text.empty()
+
+        st.subheader("🎬 Anteprima (480p)")
+        if preview_path != final_video:
+            with open(preview_path, "rb") as pf:
+                st.video(pf.read())
+            st.caption("L'anteprima è compressa a 480p per un caricamento più veloce. Il file scaricato è alla qualità originale.")
+        else:
+            st.video(video_bytes)
+
         st.download_button(
             "💾 Scarica Video",
             video_bytes,
