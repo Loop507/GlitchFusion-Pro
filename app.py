@@ -366,17 +366,8 @@ def make_preview_480p(video_path, temp_dir):
 # UI HELPER
 # ============================================================
 
-def effect_controls(label, key, default_bass=0.0, default_mid=0.0, default_treble=0.0):
-    col_chk, col_label = st.columns([1, 5])
-    enabled = col_chk.checkbox("", False, key=f"{key}_on")
-    col_label.markdown(f"**{label}**")
-    with st.expander("Parametri", expanded=False):
-        max_i = st.slider("Intensità Max", 0.0, 2.0, 1.0, key=f"{key}_max")
-        c1, c2, c3 = st.columns(3)
-        bass   = c1.slider("Bassi",  0.0, 1.0, default_bass,   key=f"{key}_bass")
-        mid    = c2.slider("Medie",  0.0, 1.0, default_mid,    key=f"{key}_mid")
-        treble = c3.slider("Alte",   0.0, 1.0, default_treble, key=f"{key}_treble")
-    return enabled, bass, mid, treble, max_i
+def effect_toggle(label, key):
+    return st.checkbox(label, False, key=f"{key}_on")
 
 # ============================================================
 # MAIN
@@ -417,21 +408,30 @@ def main():
         include_audio = st.checkbox("Includi audio in output", True)
 
         st.markdown("---")
+        st.subheader("🎚️ Reattività Audio (globale)")
+        st.caption("Un'unica impostazione condivisa da tutti gli effetti attivi.")
+        global_max = st.slider("Intensità Max", 0.0, 2.0, 1.0, key="global_max")
+        gc1, gc2, gc3 = st.columns(3)
+        global_bass   = gc1.slider("Bassi",  0.0, 1.0, 0.5, key="global_bass")
+        global_mid    = gc2.slider("Medie",  0.0, 1.0, 0.4, key="global_mid")
+        global_treble = gc3.slider("Alte",   0.0, 1.0, 0.3, key="global_treble")
+
+        st.markdown("---")
         st.subheader("🎨 Effetti Cosmetici")
-        en_shake,   shake_b,   shake_m,   shake_t,   shake_max   = effect_controls("🫨 Shake",              "shake",   0.8, 0.0, 0.0)
-        en_pixel,   pixel_b,   pixel_m,   pixel_t,   pixel_max   = effect_controls("🟦 Pixel Art",          "pixel",   0.0, 0.6, 0.0)
-        en_tv,      tv_b,      tv_m,      tv_t,      tv_max      = effect_controls("📺 TV Noise",           "tv",      0.0, 0.0, 0.5)
-        en_color,   color_b,   color_m,   color_t,   color_max   = effect_controls("🌈 Distorsione Colori", "color",   0.6, 0.3, 0.2)
-        en_flash,   *_                                            = effect_controls("⚡ Flash Battiti",      "flash",   0.0, 0.0, 0.0)
+        en_shake   = effect_toggle("🫨 Shake",              "shake")
+        en_pixel   = effect_toggle("🟦 Pixel Art",          "pixel")
+        en_tv      = effect_toggle("📺 TV Noise",           "tv")
+        en_color   = effect_toggle("🌈 Distorsione Colori", "color")
+        en_flash   = effect_toggle("⚡ Flash Battiti",      "flash")
 
         st.markdown("---")
         st.subheader("💥 Effetti Distruttivi")
-        en_disp,    disp_b,    disp_m,    disp_t,    disp_max    = effect_controls("🌊 Displacement Map",   "disp",    0.5, 0.3, 0.1)
-        en_sort,    sort_b,    sort_m,    sort_t,    sort_max    = effect_controls("🧬 Pixel Sorting",      "sort",    0.0, 0.5, 0.7)
-        en_mosh,    mosh_b,    mosh_m,    mosh_t,    mosh_max    = effect_controls("👻 Datamosh",           "mosh",    0.7, 0.2, 0.0)
-        en_echo,    echo_b,    echo_m,    echo_t,    echo_max    = effect_controls("🔁 Frame Echo",         "echo",    0.4, 0.4, 0.2)
-        en_corrupt, corr_b,    corr_m,    corr_t,    corr_max    = effect_controls("🧱 Corruzione Digitale","corrupt", 0.8, 0.1, 0.0)
-        en_glitch,  glit_b,    glit_m,    glit_t,    glit_max    = effect_controls("⚡ Glitch Lines",       "glitch",  0.6, 0.3, 0.2)
+        en_disp    = effect_toggle("🌊 Displacement Map",   "disp")
+        en_sort    = effect_toggle("🧬 Pixel Sorting",      "sort")
+        en_mosh    = effect_toggle("👻 Datamosh",           "mosh")
+        en_echo    = effect_toggle("🔁 Frame Echo",         "echo")
+        en_corrupt = effect_toggle("🧱 Corruzione Digitale","corrupt")
+        en_glitch  = effect_toggle("⚡ Glitch Lines",       "glitch")
 
     # ---- Upload ----
     col1, col2 = st.columns([1, 1])
@@ -597,47 +597,44 @@ def main():
                 raw = max(e_b * w_b, e_m * w_m, e_t * w_t)
                 return min(max_i, raw)
 
+            shared_gate = (bv > global_bass * 0.5 or mv > global_mid * 0.5 or tv > global_treble * 0.5)
+            shared_intensity = intensity(bv, global_bass, mv, global_mid, tv, global_treble, global_max)
+
             try:
                 # --- EFFETTI COSMETICI ---
-                if en_shake and (bv > shake_b * 0.5 or mv > shake_m * 0.5 or tv > shake_t * 0.5):
-                    frame = apply_shake_effect(frame, intensity(bv, shake_b, mv, shake_m, tv, shake_t, shake_max))
+                if en_shake and shared_gate:
+                    frame = apply_shake_effect(frame, shared_intensity)
 
-                if en_pixel and (bv > pixel_b * 0.5 or mv > pixel_m * 0.5 or tv > pixel_t * 0.5):
-                    frame = apply_pixelate_effect(frame, intensity(bv, pixel_b, mv, pixel_m, tv, pixel_t, pixel_max))
+                if en_pixel and shared_gate:
+                    frame = apply_pixelate_effect(frame, shared_intensity)
 
-                if en_tv and (bv > tv_b * 0.5 or mv > tv_m * 0.5 or tv > tv_t * 0.5):
-                    frame = apply_tv_noise_effect(frame, intensity(bv, tv_b, mv, tv_m, tv, tv_t, tv_max))
+                if en_tv and shared_gate:
+                    frame = apply_tv_noise_effect(frame, shared_intensity)
 
-                if en_color and (bv > color_b * 0.5 or mv > color_m * 0.5 or tv > color_t * 0.5):
-                    frame = apply_color_distortion(frame, intensity(bv, color_b, mv, color_m, tv, color_t, color_max))
+                if en_color and shared_gate:
+                    frame = apply_color_distortion(frame, shared_intensity)
 
                 if en_flash and beat_intensity > 0.8:
                     frame = apply_beat_flash(frame, beat_intensity)
 
                 # --- EFFETTI DISTRUTTIVI ---
-                if en_disp and (bv > disp_b * 0.5 or mv > disp_m * 0.5 or tv > disp_t * 0.5):
-                    i_val = intensity(bv, disp_b, mv, disp_m, tv, disp_t, disp_max)
-                    frame = apply_displacement_map(frame, i_val, prev_frame)
+                if en_disp and shared_gate:
+                    frame = apply_displacement_map(frame, shared_intensity, prev_frame)
 
-                if en_sort and (bv > sort_b * 0.5 or mv > sort_m * 0.5 or tv > sort_t * 0.5):
-                    i_val = intensity(bv, sort_b, mv, sort_m, tv, sort_t, sort_max)
-                    frame = apply_pixel_sort(frame, i_val)
+                if en_sort and shared_gate:
+                    frame = apply_pixel_sort(frame, shared_intensity)
 
-                if en_mosh and (bv > mosh_b * 0.5 or mv > mosh_m * 0.5 or tv > mosh_t * 0.5):
-                    i_val = intensity(bv, mosh_b, mv, mosh_m, tv, mosh_t, mosh_max)
-                    frame = apply_datamosh(frame, prev_frame, i_val)
+                if en_mosh and shared_gate:
+                    frame = apply_datamosh(frame, prev_frame, shared_intensity)
 
-                if en_echo and (bv > echo_b * 0.5 or mv > echo_m * 0.5 or tv > echo_t * 0.5):
-                    i_val = intensity(bv, echo_b, mv, echo_m, tv, echo_t, echo_max)
-                    frame = apply_frame_echo(frame, echo_buffer, i_val)
+                if en_echo and shared_gate:
+                    frame = apply_frame_echo(frame, echo_buffer, shared_intensity)
 
-                if en_corrupt and (bv > corr_b * 0.5 or mv > corr_m * 0.5 or tv > corr_t * 0.5):
-                    i_val = intensity(bv, corr_b, mv, corr_m, tv, corr_t, corr_max)
-                    frame = apply_digital_corruption_effect(frame, i_val)
+                if en_corrupt and shared_gate:
+                    frame = apply_digital_corruption_effect(frame, shared_intensity)
 
-                if en_glitch and (bv > glit_b * 0.5 or mv > glit_m * 0.5 or tv > glit_t * 0.5):
-                    i_val = intensity(bv, glit_b, mv, glit_m, tv, glit_t, glit_max)
-                    frame = apply_glitch_lines(frame, i_val)
+                if en_glitch and shared_gate:
+                    frame = apply_glitch_lines(frame, shared_intensity)
 
             except Exception as e:
                 st.warning(f"⚠️ Errore effetti al frame {frame_count}: {e}")
