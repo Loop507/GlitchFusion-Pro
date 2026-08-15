@@ -509,7 +509,7 @@ def main():
             if bass_e is not None:
                 st.success(f"🎶 BPM stimati: {tempo:.1f} | Battiti: {len(beat_times)}")
             else:
-                st.warning("⚠️ Analisi audio fallita. Effetti senza sincronizzazione.")
+                st.warning("⚠️ Analisi audio fallita. Effetti applicati in modalità statica (senza sincronizzazione al beat).")
 
         # Apertura video
         cap = cv2.VideoCapture(video_path)
@@ -579,9 +579,17 @@ def main():
                 idx = min(int(current_time / t_arr[-1] * len(t_arr)), len(energy_arr) - 1)
                 return float(energy_arr[idx])
 
-            bv = band_val(bass_e)
-            mv = band_val(mid_e)
-            tv = band_val(treble_e)
+            if bass_e is None and mid_e is None and treble_e is None:
+                # Nessun audio disponibile (o analisi fallita): non azzerare
+                # bv/mv/tv, altrimenti la condizione "energia > peso*0.5" e'
+                # sempre falsa e nessun effetto scatta mai. Uso un valore
+                # costante cosi' gli effetti restano attivi (modalita' statica,
+                # senza reattivita' al beat).
+                bv = mv = tv = 1.0
+            else:
+                bv = band_val(bass_e)
+                mv = band_val(mid_e)
+                tv = band_val(treble_e)
 
             def intensity(e_b, w_b, e_m, w_m, e_t, w_t, max_i):
                 raw = max(e_b * w_b, e_m * w_m, e_t * w_t)
