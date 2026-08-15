@@ -367,8 +367,10 @@ def make_preview_480p(video_path, temp_dir):
 # ============================================================
 
 def effect_controls(label, key, default_bass=0.0, default_mid=0.0, default_treble=0.0):
-    with st.expander(label, expanded=False):
-        enabled = st.checkbox("Abilitato", True, key=f"{key}_on")
+    col_chk, col_label = st.columns([1, 5])
+    enabled = col_chk.checkbox("", False, key=f"{key}_on")
+    col_label.markdown(f"**{label}**")
+    with st.expander("Parametri", expanded=False):
         max_i = st.slider("Intensità Max", 0.0, 2.0, 1.0, key=f"{key}_max")
         c1, c2, c3 = st.columns(3)
         bass   = c1.slider("Bassi",  0.0, 1.0, default_bass,   key=f"{key}_bass")
