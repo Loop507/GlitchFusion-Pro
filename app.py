@@ -98,6 +98,11 @@ def apply_pixel_sort(frame, intensity, mode="luminosity"):
     """
     Pixel sorting: riordina i pixel lungo le righe in base
     alla luminosità (o canale). Crea scie e lacerazioni.
+
+    Versione vettorizzata: invece di un loop Python su ogni pixel
+    per trovare i segmenti (lento su HD), uso un id di segmento
+    calcolato con cumsum sulle transizioni della maschera, poi
+    ordino ogni segmento con un singolo np.lexsort per riga.
     """
     h, w = frame.shape[:2]
     result = frame.copy()
@@ -112,25 +117,23 @@ def apply_pixel_sort(frame, intensity, mode="luminosity"):
     for y in row_indices:
         row = gray[y, :]
         mask = (row >= threshold_low) & (row <= threshold_high)
-        segs = []
-        in_seg = False
-        start = 0
-        for x in range(w):
-            if mask[x] and not in_seg:
-                start = x
-                in_seg = True
-            elif not mask[x] and in_seg:
-                segs.append((start, x))
-                in_seg = False
-        if in_seg:
-            segs.append((start, w))
+        if not mask.any():
+            continue
 
-        for s, e in segs:
-            if e - s > 2:
-                seg_pixels = frame[y, s:e]
-                lum = gray[y, s:e]
-                order = np.argsort(lum)
-                result[y, s:e] = seg_pixels[order]
+        # id di segmento: incrementa a ogni inizio di run True,
+        # essendo monotono lungo x un lexsort per (seg_id, lum)
+        # ordina i pixel SOLO all'interno del proprio segmento
+        # contiguo, senza mescolare segmenti diversi tra loro.
+        starts = mask & ~np.concatenate(([False], mask[:-1]))
+        seg_id = np.cumsum(starts)
+
+        masked_idx = np.nonzero(mask)[0]
+        seg = seg_id[masked_idx]
+        lum = row[masked_idx].astype(np.int32)
+        order = np.lexsort((lum, seg))
+        sorted_idx = masked_idx[order]
+
+        result[y, masked_idx] = frame[y, sorted_idx]
 
     return result
 
@@ -168,20 +171,34 @@ def apply_datamosh(frame, prev_frame, intensity):
 def apply_frame_echo(frame, echo_buffer, intensity):
     """
     Frame echo / feedback loop: mescola il frame attuale con
-    versioni precedenti deformate, creando eco visivo accumulato.
+    versioni precedenti, applicando a ciascuna un piccolo zoom
+    e una rotazione progressivi (in base a quanto è "vecchio" il
+    frame nel buffer), come nel classico feedback camera-su-monitor
+    analogico, invece di un semplice blend statico.
     """
     if not echo_buffer:
         return frame
 
+    h, w = frame.shape[:2]
+    center = (w / 2, h / 2)
     result = frame.astype(np.float32)
     decay = 0.7
     weight_total = 1.0
 
+    zoom_per_step = 1.0 + intensity * 0.03
+    rot_per_step = intensity * 4.0  # gradi per step di età
+
     for i, old_frame in enumerate(reversed(echo_buffer)):
         if old_frame.shape != frame.shape:
             continue
-        w_echo = intensity * (decay ** (i + 1))
-        result += old_frame.astype(np.float32) * w_echo
+        age = i + 1
+        scale = zoom_per_step ** age
+        angle = rot_per_step * age
+        M = cv2.getRotationMatrix2D(center, angle, scale)
+        warped = cv2.warpAffine(old_frame, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+
+        w_echo = intensity * (decay ** age)
+        result += warped.astype(np.float32) * w_echo
         weight_total += w_echo
 
     result = np.clip(result / weight_total * (1 + intensity * 0.3), 0, 255)
