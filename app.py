@@ -137,23 +137,43 @@ def apply_pixel_sort(frame, intensity, mode="luminosity"):
 
     return result
 
-def apply_datamosh(frame, prev_frame, intensity):
+def apply_datamosh(frame, prev_frame, intensity, flow_scale=0.5):
     """
     Simula il datamoshing: il frame precedente "invade" quello attuale
     tramite differenza di movimento, creando ghost e smear.
+
+    Ottimizzazione: l'optical flow Farneback (il calcolo più pesante
+    di questa funzione) viene stimato su una versione ridotta dei
+    frame (flow_scale) e poi la mappa di flusso viene ingrandita alla
+    risoluzione piena, invece di ricalcolarla ogni frame a piena
+    risoluzione. Il campo di moto varia in modo abbastanza continuo
+    nello spazio, quindi la perdita di dettaglio è trascurabile per
+    questo effetto mentre il guadagno di velocità è significativo.
     """
     if prev_frame is None or prev_frame.shape != frame.shape:
         return frame
 
     h, w = frame.shape[:2]
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    small_w = max(2, int(w * flow_scale))
+    small_h = max(2, int(h * flow_scale))
 
-    flow = cv2.calcOpticalFlowFarneback(
+    prev_small = cv2.resize(prev_frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+    curr_small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+    prev_gray = cv2.cvtColor(prev_small, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(curr_small, cv2.COLOR_BGR2GRAY)
+
+    flow_small = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
         pyr_scale=0.5, levels=2, winsize=15,
         iterations=2, poly_n=5, poly_sigma=1.1, flags=0
     )
+
+    # riporto la mappa a piena risoluzione: sia le dimensioni sia i
+    # valori di spostamento (in pixel, relativi alla scala ridotta)
+    # vanno riscalati di conseguenza.
+    flow = cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR)
+    flow[:, :, 0] *= (w / small_w)
+    flow[:, :, 1] *= (h / small_h)
 
     map_x = np.tile(np.arange(w), (h, 1)).astype(np.float32)
     map_y = np.tile(np.arange(h), (w, 1)).T.astype(np.float32)
@@ -264,9 +284,79 @@ def apply_glitch_lines(frame, intensity):
 
     return result
 
-# ============================================================
-# ANALISI AUDIO
-# ============================================================
+def apply_vhs_effect(frame, intensity):
+    """
+    Scanline/interlacciato + VHS chroma bleed: righe pari scurite
+    (simula l'interlacciamento) e sbavatura orizzontale dei canali
+    colore (rosso e blu shiftati e sfocati), tipico del degrado
+    di una cassetta VHS.
+    """
+    result = frame.copy().astype(np.float32)
+
+    # scanline: scurisce le righe pari
+    scan_strength = 0.15 + intensity * 0.35
+    result[::2] *= (1 - scan_strength)
+
+    # chroma bleed: shift orizzontale opposto su B e R, poi blur orizzontale
+    shift = max(1, int(intensity * 6))
+    b, g, r = cv2.split(result)
+    b = np.roll(b, shift, axis=1)
+    r = np.roll(r, -shift, axis=1)
+    ksize = (max(1, int(intensity * 5)) | 1)  # deve essere dispari
+    b = cv2.GaussianBlur(b, (ksize, 1), 0)
+    r = cv2.GaussianBlur(r, (ksize, 1), 0)
+    result = cv2.merge([b, g, r])
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+def apply_bitcrush_effect(frame, intensity):
+    """
+    Bit-crush / posterize: riduce il numero di livelli per canale
+    colore e la risoluzione effettiva, per un look minimale ad alto
+    contrasto (estetica Ikeda / Computazionale).
+    """
+    h, w = frame.shape[:2]
+
+    levels = max(2, int(16 - intensity * 13))  # da 16 a ~3 livelli
+    step = 255 / (levels - 1)
+    result = np.round(frame.astype(np.float32) / step) * step
+
+    scale = 1.0 - intensity * 0.5
+    small_w = max(1, int(w * scale))
+    small_h = max(1, int(h * scale))
+    small = cv2.resize(result.astype(np.uint8), (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+    result = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+def apply_slitscan_effect(frame, echo_buffer, intensity):
+    """
+    Slit-scan: il frame finale viene ricomposto a fasce verticali,
+    ognuna presa da un istante temporale diverso (dal frame corrente
+    ai frame precedenti nel buffer), creando uno strappo temporale
+    orizzontale classico della tecnica slit-scan analogica.
+    """
+    h, w = frame.shape[:2]
+    if not echo_buffer:
+        return frame
+
+    history = list(echo_buffer) + [frame]  # dal piu' vecchio al piu' recente
+    n = len(history)
+    result = frame.copy()
+
+    num_slices = max(1, int(intensity * 8))
+    slice_w = max(1, w // (num_slices + 1))
+
+    for i in range(num_slices):
+        x0 = int(w * (i + 1) / (num_slices + 1)) - slice_w // 2
+        x0 = max(0, min(w - slice_w, x0))
+        x1 = x0 + slice_w
+        src_idx = int((i / max(1, num_slices - 1)) * (n - 1)) if num_slices > 1 else n - 1
+        src_frame = history[src_idx]
+        if src_frame.shape == frame.shape:
+            result[:, x0:x1] = src_frame[:, x0:x1]
+
+    return result
 
 def analyze_audio_cached(audio_path: str):
     """Analizza l'audio dal path (hashabile per la cache di Streamlit)."""
@@ -414,6 +504,10 @@ def main():
     with st.sidebar:
         st.header("⚙️ Parametri Globali")
         output_fps = st.slider("FPS Output", 10, 30, 24)
+        seed_value = st.number_input(
+            "Seed casualità (0 = genera automaticamente)", min_value=0, max_value=999999, value=0, step=1,
+            help="Con lo stesso seed e gli stessi parametri, il risultato è riproducibile identico tra un run e l'altro. Con 0 ne viene generato uno casuale e mostrato a fine elaborazione, così puoi recuperarlo."
+        )
 
         st.subheader("Formato Video")
         aspect_ratio = st.selectbox(
@@ -450,6 +544,36 @@ def main():
         en_corrupt = effect_toggle("🧱 Corruzione Digitale","corrupt")
         en_glitch  = effect_toggle("⚡ Glitch Lines",       "glitch")
 
+        st.markdown("---")
+        st.subheader("🧪 Effetti Sperimentali")
+        en_vhs      = effect_toggle("📼 VHS / Scanline",     "vhs")
+        en_bitcrush = effect_toggle("🔲 Bit-Crush",          "bitcrush")
+        en_slitscan = effect_toggle("🪞 Slit-Scan",          "slitscan")
+
+        st.markdown("---")
+        st.subheader("🔀 Ordine Catena Effetti")
+        st.caption("L'ordine in cui rimuovi e riaggiungi le voci qui sotto determina l'ordine di applicazione degli effetti attivi. Di default è quello classico.")
+        default_chain_order = [
+            "🫨 Shake", "🟦 Pixel Art", "📺 TV Noise", "🌈 Distorsione Colori",
+            "⚡ Flash Battiti", "🌊 Displacement Map", "🧬 Pixel Sorting",
+            "👻 Datamosh", "🔁 Frame Echo", "🧱 Corruzione Digitale",
+            "⚡ Glitch Lines", "📼 VHS / Scanline", "🔲 Bit-Crush", "🪞 Slit-Scan",
+        ]
+        chain_order_labels = st.multiselect(
+            "Sequenza", options=default_chain_order, default=default_chain_order,
+            key="chain_order"
+        )
+        _label_to_key = {
+            "🫨 Shake": "shake", "🟦 Pixel Art": "pixel", "📺 TV Noise": "tv",
+            "🌈 Distorsione Colori": "color", "⚡ Flash Battiti": "flash",
+            "🌊 Displacement Map": "disp", "🧬 Pixel Sorting": "sort",
+            "👻 Datamosh": "mosh", "🔁 Frame Echo": "echo",
+            "🧱 Corruzione Digitale": "corrupt", "⚡ Glitch Lines": "glitch",
+            "📼 VHS / Scanline": "vhs", "🔲 Bit-Crush": "bitcrush",
+            "🪞 Slit-Scan": "slitscan",
+        }
+        chain_order = [_label_to_key[l] for l in chain_order_labels if l in _label_to_key]
+
     # ---- Upload ----
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -484,6 +608,15 @@ def main():
 
     temp_dir = None
     try:
+        # Seed di riproducibilita': con seed_value=0 genero comunque un
+        # seed casuale (invece di lasciare il generatore "libero") cosi'
+        # posso mostrarlo a fine elaborazione — l'utente puo' recuperarlo
+        # e reimpostarlo manualmente per rifare identico un risultato che
+        # gli e' piaciuto, anche se non lo aveva scelto lui stesso.
+        actual_seed = int(seed_value) if seed_value else random.randint(1, 999999)
+        random.seed(actual_seed)
+        np.random.seed(actual_seed % (2**32 - 1))
+
         temp_dir = tempfile.mkdtemp()
 
         # Salva video
@@ -617,41 +750,53 @@ def main():
             shared_gate = (bv > global_bass * 0.5 or mv > global_mid * 0.5 or tv > global_treble * 0.5)
             shared_intensity = intensity(bv, global_bass, mv, global_mid, tv, global_treble, global_max)
 
+            enabled_map = {
+                "shake": en_shake, "pixel": en_pixel, "tv": en_tv, "color": en_color,
+                "flash": en_flash, "disp": en_disp, "sort": en_sort, "mosh": en_mosh,
+                "echo": en_echo, "corrupt": en_corrupt, "glitch": en_glitch,
+                "vhs": en_vhs, "bitcrush": en_bitcrush, "slitscan": en_slitscan,
+            }
+
             try:
-                # --- EFFETTI COSMETICI ---
-                if en_shake and shared_gate:
-                    frame = apply_shake_effect(frame, shared_intensity)
+                for eff_key in chain_order:
+                    if not enabled_map.get(eff_key):
+                        continue
 
-                if en_pixel and shared_gate:
-                    frame = apply_pixelate_effect(frame, shared_intensity)
+                    # il flash reagisce al beat, non al gate energia bande
+                    if eff_key == "flash":
+                        if beat_intensity > 0.8:
+                            frame = apply_beat_flash(frame, beat_intensity)
+                        continue
 
-                if en_tv and shared_gate:
-                    frame = apply_tv_noise_effect(frame, shared_intensity)
+                    if not shared_gate:
+                        continue
 
-                if en_color and shared_gate:
-                    frame = apply_color_distortion(frame, shared_intensity)
-
-                if en_flash and beat_intensity > 0.8:
-                    frame = apply_beat_flash(frame, beat_intensity)
-
-                # --- EFFETTI DISTRUTTIVI ---
-                if en_disp and shared_gate:
-                    frame = apply_displacement_map(frame, shared_intensity, prev_frame)
-
-                if en_sort and shared_gate:
-                    frame = apply_pixel_sort(frame, shared_intensity)
-
-                if en_mosh and shared_gate:
-                    frame = apply_datamosh(frame, prev_frame, shared_intensity)
-
-                if en_echo and shared_gate:
-                    frame = apply_frame_echo(frame, echo_buffer, shared_intensity)
-
-                if en_corrupt and shared_gate:
-                    frame = apply_digital_corruption_effect(frame, shared_intensity)
-
-                if en_glitch and shared_gate:
-                    frame = apply_glitch_lines(frame, shared_intensity)
+                    if eff_key == "shake":
+                        frame = apply_shake_effect(frame, shared_intensity)
+                    elif eff_key == "pixel":
+                        frame = apply_pixelate_effect(frame, shared_intensity)
+                    elif eff_key == "tv":
+                        frame = apply_tv_noise_effect(frame, shared_intensity)
+                    elif eff_key == "color":
+                        frame = apply_color_distortion(frame, shared_intensity)
+                    elif eff_key == "disp":
+                        frame = apply_displacement_map(frame, shared_intensity, prev_frame)
+                    elif eff_key == "sort":
+                        frame = apply_pixel_sort(frame, shared_intensity)
+                    elif eff_key == "mosh":
+                        frame = apply_datamosh(frame, prev_frame, shared_intensity)
+                    elif eff_key == "echo":
+                        frame = apply_frame_echo(frame, echo_buffer, shared_intensity)
+                    elif eff_key == "corrupt":
+                        frame = apply_digital_corruption_effect(frame, shared_intensity)
+                    elif eff_key == "glitch":
+                        frame = apply_glitch_lines(frame, shared_intensity)
+                    elif eff_key == "vhs":
+                        frame = apply_vhs_effect(frame, shared_intensity)
+                    elif eff_key == "bitcrush":
+                        frame = apply_bitcrush_effect(frame, shared_intensity)
+                    elif eff_key == "slitscan":
+                        frame = apply_slitscan_effect(frame, echo_buffer, shared_intensity)
 
             except Exception as e:
                 st.warning(f"⚠️ Errore effetti al frame {frame_count}: {e}")
@@ -712,6 +857,7 @@ def main():
         status_text.empty()
         st.balloons()
         st.success("✅ Elaborazione completata!")
+        st.info(f"🎲 Seed usato per questa elaborazione: **{actual_seed}** — inseriscilo nel campo Seed per rigenerare lo stesso identico risultato.")
 
         with open(final_video, "rb") as vf:
             video_bytes = vf.read()
